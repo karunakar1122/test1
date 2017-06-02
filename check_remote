@@ -1,0 +1,85 @@
+#!/bin/bash
+
+# Executes a local nagios plugin on a remote server.
+
+# Some variables you are likely to change
+SSH_USER=checkuser                      # user for SSH logins, default user running nagios
+SSH_KEY=~nagios/.ssh/checkuser.rsa      # SSH key, can be empty
+
+PLUGINDIR=/usr/lib/nagios/plugins       # nagios plugin dir
+REMOTEDIR=/tmp                          # remote dir for file uploads
+
+# Strips off hostname (first two arguments, $1 and $2), and leaves options only
+ARGS=$@
+ARGS=${ARGS##*$2}                               # plugin arguments
+
+# Display help if no arguments given, or paths wrong
+if [ ! "$1" -o ! "$2" -o "$1" == "--help" -o "$1" == "-h" ] ; then
+cat <<EOF
+
+Executes a local nagios plugin on a remote server.
+
+Usage:
+
+    $0 <hostname> <nagios_check_plugin> [plugin arguments]
+
+EOF
+exit 0
+fi
+
+# Fetch the SSH key; if file exists, set SSH options to use this key
+[ -f "$SSH_KEY" ] && SSH_OPTIONS="-i "$SSH_KEY""
+
+
+# Fetch the user, if exists, it is used, otherwise, use the current user
+[ ! "$SSH_USER" ] && SSH_USER=$USERNAME
+
+# Calculate md5sum of the plugin - we want to be sure that we run it remotely, and not something else
+MD5_LOCAL=$(md5sum $PLUGINDIR/$2 | cut -f1 -d " ")
+
+# Our plugin executed remotely
+
+# We login to the remote server, check if the plugin is there - if yes, we run it.
+# If not, we "cat" the plugin, and pipe it via ssh to the remote server, and execute it.
+
+cat $PLUGINDIR/$2 | ssh $SSH_OPTIONS $SSH_USER@$1 \
+    "# if the plugin exists on the remote side in $PLUGINDIR, execute it
+    if [ -x $PLUGINDIR/$2 ] ; then
+        $PLUGINDIR/$2 $ARGS
+        EXITCODE=\$?
+        exit \$EXITCODE
+
+    # if it doesn't exist in $PLUGINDIR, is it in $REMOTEDIR?
+    elif [ -x $REMOTEDIR/nagios-$2 ] ; then
+
+    # is it the same as the plugin on the server? if yes, execute it
+        MD5_REMOTE=\$(md5sum < $REMOTEDIR/nagios-$2)
+            if [ \"$MD5_LOCAL\" == \"\$MD5_REMOTE\" ] ; then
+                $REMOTEDIR/nagios-$2 $ARGS
+                EXITCODE=\$?
+                exit \$EXITCODE
+            else
+                UPLOAD=1
+        fi
+    fi
+
+    # it's not in $PLUGINDIR nor $REMOTEDIR, upload it
+    if [ ! -x \"$REMOTEDIR/nagios-$2\" -a ! -x \"$PLUGINDIR/$2\" -o \"\$UPLOAD\" ] ; then
+        rm -f $REMOTEDIR/nagios-$2 # remove if it exists; someone might made a symlink to some other file
+        cat > $REMOTEDIR/nagios-$2 
+        chmod 700 $REMOTEDIR/nagios-$2
+        $REMOTEDIR/nagios-$2 $ARGS
+        EXITCODE=\$?
+        exit \$EXITCODE
+    fi"
+
+EXITCODE=$?
+
+# Note that the remote command should not return exit code 255,
+# it is used by ssh if it fails to connect
+if [ $EXITCODE -eq 255 ] ; then
+    echo "CRITICAL - Unable to connect ($1)"
+    exit 2
+else
+    exit $EXITCODE
+fi
